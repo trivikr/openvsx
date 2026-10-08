@@ -12,7 +12,7 @@ import * as http from 'http';
 import * as fs from 'fs';
 import * as semver from 'semver';
 import { pipeline, Writable } from 'stream';
-import * as followRedirects from 'follow-redirects';
+import { httpRequest, HttpRequestOptions } from './http-request';
 import { RegistryOptions } from './registry-options';
 import { DEFAULT_TIMEOUT, redactUrl, rejectError, statusError, withStatus } from './util';
 
@@ -120,7 +120,7 @@ export class Registry {
     /**
      * `sizeLimit` is the limit the registry reports for this package, when it could report one. The
      * transport body cap is raised to it, because a namespace granted more than the default would
-     * otherwise have its upload refused here - by follow-redirects, before anything reached the
+     * otherwise have its upload refused here - by the `maxBodyLength` check, before anything reached the
      * registry that allowed it.
      */
     async publish(file: string, pat: string, sizeLimit?: number): Promise<Extension> {
@@ -288,8 +288,7 @@ export class Registry {
             };
 
             const requestOptions = this.getRequestOptions();
-            const request = this.getProtocol(url)
-                                .request(url, requestOptions, response => {
+            const request = httpRequest(url, requestOptions, response => {
                 if (response.statusCode !== undefined && (response.statusCode < 200 || response.statusCode > 299)) {
                     response.resume();
                     reject(statusError(response));
@@ -326,8 +325,7 @@ export class Registry {
     getJson<T extends Response>(url: URL, headers?: http.OutgoingHttpHeaders): Promise<T> {
         return new Promise((resolve, reject) => {
             const requestOptions = this.getRequestOptions('GET', headers);
-            const request = this.getProtocol(url)
-                                .request(url, requestOptions, this.getJsonResponse<T>(resolve, reject));
+            const request = httpRequest(url, requestOptions, this.getJsonResponse<T>(resolve, reject));
             request.on('error', reject);
             this.failOnTimeout(request, url, reject);
             request.end();
@@ -337,8 +335,7 @@ export class Registry {
     post<T extends Response>(content: string | Buffer | Uint8Array, url: URL, headers?: http.OutgoingHttpHeaders, maxBodyLength?: number): Promise<T> {
         return new Promise((resolve, reject) => {
             const requestOptions = this.getRequestOptions('POST', headers, maxBodyLength);
-            const request = this.getProtocol(url)
-                                .request(url, requestOptions, this.getJsonResponse<T>(resolve, reject));
+            const request = httpRequest(url, requestOptions, this.getJsonResponse<T>(resolve, reject));
             request.on('error', reject);
             this.failOnTimeout(request, url, reject);
             request.write(content);
@@ -350,8 +347,7 @@ export class Registry {
         return new Promise((resolve, reject) => {
             const stream = fs.createReadStream(file);
             const requestOptions = this.getRequestOptions('POST', headers, maxBodyLength);
-            const request = this.getProtocol(url)
-                                .request(url, requestOptions, this.getJsonResponse<T>(resolve, reject));
+            const request = httpRequest(url, requestOptions, this.getJsonResponse<T>(resolve, reject));
             stream.on('error', (err: Error) => {
                 request.destroy();
                 reject(err);
@@ -407,10 +403,6 @@ export class Registry {
         return url;
     }
 
-    private getProtocol(url: URL) {
-        return url.protocol === 'https:' ? followRedirects.https : followRedirects.http;
-    }
-
     /**
      * Node's `timeout` option only raises an event - the request stays open, which is why a server
      * that accepts a connection and then says nothing used to hold a command open indefinitely.
@@ -418,8 +410,6 @@ export class Registry {
      * has, so a stalled request rejects the way any other failure does. With a timeout of zero the
      * event never fires and this does nothing.
      */
-    // Typed on Writable because both http.ClientRequest and follow-redirects' wrapper are ones, and
-    // all this needs is the timeout event and destroy.
     private failOnTimeout(request: Writable, url: URL, fail: (err: Error) => void): void {
         request.on('timeout', () => {
             // Reported before the request is torn down, rather than by destroying it with the error.
@@ -433,7 +423,7 @@ export class Registry {
         });
     }
 
-    private getRequestOptions(method?: string, headers?: http.OutgoingHttpHeaders, maxBodyLength?: number): http.RequestOptions {
+    private getRequestOptions(method?: string, headers?: http.OutgoingHttpHeaders, maxBodyLength?: number): HttpRequestOptions {
         if (this.username && this.password) {
             headers ??= {};
             const credentials = Buffer.from(this.username + ':' + this.password).toString('base64');
@@ -444,7 +434,7 @@ export class Registry {
             headers,
             maxBodyLength,
             timeout: this.timeout
-        } as http.RequestOptions;
+        };
     }
 
     private getJsonResponse<T extends Response>(resolve: (value: T) => void, reject: (reason: any) => void): (res: http.IncomingMessage) => void {
